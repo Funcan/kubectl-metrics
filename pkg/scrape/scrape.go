@@ -25,7 +25,7 @@ import (
 )
 
 // Endpoint port-forwards to the given pod endpoint, scrapes Prometheus metrics, and displays them.
-func Endpoint(ctx context.Context, restConfig *rest.Config, clientset kubernetes.Interface, namespace string, pod *corev1.Pod, endpoint discover.MetricsEndpoint, showValues bool, verbose bool, streams genericiooptions.IOStreams) error {
+func Endpoint(ctx context.Context, restConfig *rest.Config, clientset kubernetes.Interface, namespace string, pod *corev1.Pod, endpoint discover.MetricsEndpoint, showValues bool, showDescription bool, verbose bool, streams genericiooptions.IOStreams) error {
 	verboseLog(verbose, streams.ErrOut, "Port-forwarding to pod %s port %d...\n", pod.Name, endpoint.PortNum)
 
 	reqURL := clientset.CoreV1().RESTClient().Post().
@@ -91,11 +91,11 @@ func Endpoint(ctx context.Context, restConfig *rest.Config, clientset kubernetes
 		return fmt.Errorf("parsing metrics: %w", err)
 	}
 
-	displayMetrics(streams.Out, endpoint, families, showValues)
+	displayMetrics(streams.Out, endpoint, families, showValues, showDescription)
 	return nil
 }
 
-func displayMetrics(out io.Writer, endpoint discover.MetricsEndpoint, families map[string]*dto.MetricFamily, showValues bool) {
+func displayMetrics(out io.Writer, endpoint discover.MetricsEndpoint, families map[string]*dto.MetricFamily, showValues bool, showDescription bool) {
 	fmt.Fprintf(out, "\n%s (port: %s, path: %s)\n", endpoint.Source, endpoint.Port, endpoint.Path)
 
 	names := make([]string, 0, len(families))
@@ -109,23 +109,45 @@ func displayMetrics(out io.Writer, endpoint discover.MetricsEndpoint, families m
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 
 	if showValues {
-		fmt.Fprintln(tw, "NAME\tTYPE\tVALUE")
+		header := "NAME\tTYPE\tVALUE"
+		if showDescription {
+			header += "\tDESCRIPTION"
+		}
+		fmt.Fprintln(tw, header)
 		for _, name := range names {
 			fam := families[name]
 			typeName := strings.ToLower(fam.GetType().String())
-			for _, m := range fam.GetMetric() {
+			desc := fam.GetHelp()
+			for i, m := range fam.GetMetric() {
 				labelStr := formatLabels(m.GetLabel())
 				fullName := name + labelStr
 				value := extractValue(fam.GetType(), m)
-				fmt.Fprintf(tw, "%s\t%s\t%s\n", fullName, typeName, value)
+				line := fmt.Sprintf("%s\t%s\t%s", fullName, typeName, value)
+				if showDescription {
+					// Only show description on the first row of each metric family.
+					if i == 0 {
+						line += "\t" + desc
+					} else {
+						line += "\t"
+					}
+				}
+				fmt.Fprintln(tw, line)
 			}
 		}
 	} else {
-		fmt.Fprintln(tw, "NAME\tTYPE")
+		header := "NAME\tTYPE"
+		if showDescription {
+			header += "\tDESCRIPTION"
+		}
+		fmt.Fprintln(tw, header)
 		for _, name := range names {
 			fam := families[name]
 			typeName := strings.ToLower(fam.GetType().String())
-			fmt.Fprintf(tw, "%s\t%s\n", name, typeName)
+			line := fmt.Sprintf("%s\t%s", name, typeName)
+			if showDescription {
+				line += "\t" + fam.GetHelp()
+			}
+			fmt.Fprintln(tw, line)
 		}
 	}
 

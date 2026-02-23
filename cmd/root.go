@@ -18,9 +18,10 @@ import (
 // Options holds the configuration for the plugin command.
 type Options struct {
 	ConfigFlags *genericclioptions.ConfigFlags
-	Verbose     bool
-	ShowValues  bool
-	Streams     genericiooptions.IOStreams
+	Verbose         bool
+	ShowValues      bool
+	ShowDescription bool
+	Streams         genericiooptions.IOStreams
 }
 
 // NewCmd creates the cobra command for kubectl-metrics.
@@ -43,6 +44,7 @@ func NewCmd(streams genericiooptions.IOStreams, version string) *cobra.Command {
 	o.ConfigFlags.AddFlags(cmd.Flags())
 	cmd.Flags().BoolVar(&o.Verbose, "verbose", false, "Show detailed discovery and connection info")
 	cmd.Flags().BoolVar(&o.ShowValues, "show-values", false, "Show metric values in addition to names and types")
+	cmd.Flags().BoolVar(&o.ShowDescription, "show-description", false, "Show metric help text as a description column")
 
 	return cmd
 }
@@ -92,7 +94,7 @@ func (o *Options) Run(ctx context.Context, podName string) error {
 	o.verbose("Found %d endpoint(s) to scrape\n", len(endpoints))
 
 	for _, ep := range endpoints {
-		if err := scrape.Endpoint(ctx, restConfig, clientset, ns, pod, ep, o.ShowValues, o.Verbose, o.Streams); err != nil {
+		if err := scrape.Endpoint(ctx, restConfig, clientset, ns, pod, ep, o.ShowValues, o.ShowDescription, o.Verbose, o.Streams); err != nil {
 			fmt.Fprintf(o.Streams.ErrOut, "Error scraping %s (port %s, path %s): %v\n", ep.Source, ep.Port, ep.Path, err)
 		}
 	}
