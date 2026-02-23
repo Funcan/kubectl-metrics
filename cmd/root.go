@@ -1,19 +1,26 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/spf13/cobra"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+
+	"kubectl-metrics/pkg/discover"
+	"kubectl-metrics/pkg/scrape"
 )
 
 // Options holds the configuration for the plugin command.
 type Options struct {
-	ConfigFlags   *genericclioptions.ConfigFlags
-	AllNamespaces bool
-	Streams       genericiooptions.IOStreams
+	ConfigFlags *genericclioptions.ConfigFlags
+	Verbose     bool
+	ShowValues  bool
+	Streams     genericiooptions.IOStreams
 }
 
 // NewCmd creates the cobra command for kubectl-metrics.
@@ -24,55 +31,83 @@ func NewCmd(streams genericiooptions.IOStreams, version string) *cobra.Command {
 	}
 
 	cmd := &cobra.Command{
-		Use:          "kubectl-metrics",
-		Short:        "A kubectl plugin to display prometheus metrics exported by a pod",
-		Version:      version,
-		SilenceUsage: true,
+		Use:     "kubectl-metrics POD",
+		Short:   "A kubectl plugin to display prometheus metrics exported by a pod",
+		Version: version,
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			clientset, err := o.Clientset()
-			if err != nil {
-				return err
-			}
-
-			sv, err := clientset.Discovery().ServerVersion()
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(o.Streams.Out, "Connected to Kubernetes %s\n", sv.GitVersion)
-
-			ns, err := o.Namespace()
-			if err != nil {
-				return err
-			}
-			if ns == "" {
-				fmt.Fprintln(o.Streams.Out, "Namespace: all namespaces")
-			} else {
-				fmt.Fprintf(o.Streams.Out, "Namespace: %s\n", ns)
-			}
-			return nil
+			return o.Run(cmd.Context(), args[0])
 		},
 	}
 
 	o.ConfigFlags.AddFlags(cmd.Flags())
-	cmd.Flags().BoolVarP(&o.AllNamespaces, "all-namespaces", "A", false, "If true, list across all namespaces")
+	cmd.Flags().BoolVar(&o.Verbose, "verbose", false, "Show detailed discovery and connection info")
+	cmd.Flags().BoolVar(&o.ShowValues, "show-values", false, "Show metric values in addition to names and types")
 
 	return cmd
 }
 
-// Clientset returns a Kubernetes clientset from the resolved kubeconfig.
-func (o *Options) Clientset() (*kubernetes.Clientset, error) {
-	config, err := o.ConfigFlags.ToRESTConfig()
+// Run executes the main plugin logic for the given pod name.
+func (o *Options) Run(ctx context.Context, podName string) error {
+	restConfig, err := o.ConfigFlags.ToRESTConfig()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return kubernetes.NewForConfig(config)
+
+	clientset, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		return err
+	}
+
+	dynClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		return err
+	}
+
+	ns, err := o.Namespace()
+	if err != nil {
+		return err
+	}
+
+	o.verbose("Namespace: %s\n", ns)
+
+	// Get the target pod.
+	pod, err := clientset.CoreV1().Pods(ns).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("getting pod %s: %w", podName, err)
+	}
+
+	o.verbose("Pod %s has labels: %v\n", podName, pod.Labels)
+
+	endpoints, err := discover.Endpoints(ctx, dynClient, clientset, ns, pod, o.Verbose, o.Streams.ErrOut)
+	if err != nil {
+		return err
+	}
+
+	if len(endpoints) == 0 {
+		fmt.Fprintf(o.Streams.Out, "No ServiceMonitors or PodMonitors found matching pod %s in namespace %s\n", podName, ns)
+		return nil
+	}
+
+	o.verbose("Found %d endpoint(s) to scrape\n", len(endpoints))
+
+	for _, ep := range endpoints {
+		if err := scrape.Endpoint(ctx, restConfig, clientset, ns, pod, ep, o.ShowValues, o.Verbose, o.Streams); err != nil {
+			fmt.Fprintf(o.Streams.ErrOut, "Error scraping %s (port %s, path %s): %v\n", ep.Source, ep.Port, ep.Path, err)
+		}
+	}
+
+	return nil
 }
 
-// Namespace returns the resolved namespace. Returns "" when --all-namespaces is set.
-func (o *Options) Namespace() (string, error) {
-	if o.AllNamespaces {
-		return "", nil
+func (o *Options) verbose(format string, args ...interface{}) {
+	if o.Verbose {
+		fmt.Fprintf(o.Streams.ErrOut, format, args...)
 	}
+}
+
+// Namespace returns the resolved namespace.
+func (o *Options) Namespace() (string, error) {
 	ns, _, err := o.ConfigFlags.ToRawKubeConfigLoader().Namespace()
 	return ns, err
 }
